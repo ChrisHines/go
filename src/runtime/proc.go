@@ -222,6 +222,7 @@ func main() {
 		return
 	}
 	fn := main_main // make an indirect call, as the linker doesn't know the address of the main package when laying down the runtime
+	// dlog().s("main.main").end()
 	fn()
 	if raceenabled {
 		racefini()
@@ -331,6 +332,7 @@ func gopark(unlockf func(*g, unsafe.Pointer) bool, lock unsafe.Pointer, reason w
 	gp.waitreason = reason
 	mp.waittraceev = traceEv
 	mp.waittraceskip = traceskip
+	// dlog().s("gopark G").i64(gp.goid).s(reason.String()).end()
 	releasem(mp)
 	// can't do anything that might move the G between Ms here.
 	mcall(park_m)
@@ -740,7 +742,9 @@ func ready(gp *g, traceskip int, next bool) {
 
 	// status is Gwaiting or Gscanwaiting, make Grunnable and put on runq
 	casgstatus(gp, _Gwaiting, _Grunnable)
+	// dlog().s("ready G").i64(gp.goid).end()
 	runqput(_g_.m.p.ptr(), gp, next)
+	// dlog().s("ready wakep").end()
 	wakep()
 	releasem(mp)
 }
@@ -1010,6 +1014,7 @@ var gcsema uint32 = 1
 // stopTheWorld to block.
 func stopTheWorldWithSema() {
 	_g_ := getg()
+	// dlog().s("stopTheWorldWithSema").s(_g_.m.preemptoff).end()
 
 	// If we hold a lock, then we won't be able to stop another M
 	// that is blocked trying to acquire the lock.
@@ -1101,6 +1106,7 @@ func startTheWorldWithSema(emitTraceEvent bool) int64 {
 	sched.gcwaiting = 0
 	if sched.sysmonwait != 0 {
 		sched.sysmonwait = 0
+		// dlog().s("wake sysmon from startTheWorldWithSema").end()
 		notewakeup(&sched.sysmonnote)
 	}
 	unlock(&sched.lock)
@@ -1131,6 +1137,7 @@ func startTheWorldWithSema(emitTraceEvent bool) int64 {
 	// Wakeup an additional proc in case we have excessive runnable goroutines
 	// in local queues or in the global queue. If we don't, the proc will park itself.
 	// If we have lots of excessive work, resetspinning will unpark additional procs as necessary.
+	// dlog().s("startTheWorldWithSema wakep").end()
 	wakep()
 
 	releasem(mp)
@@ -2168,6 +2175,7 @@ func startm(_p_ *p, spinning bool) {
 					throw("startm: negative nmspinning")
 				}
 			}
+			// dlog().s("startm no idle P's available").end()
 			return
 		}
 	}
@@ -2286,6 +2294,7 @@ func wakep() {
 	if atomic.Load(&sched.nmspinning) != 0 || !atomic.Cas(&sched.nmspinning, 0, 1) {
 		return
 	}
+	// dlog().s("wakep startm").end()
 	startm(nil, true)
 }
 
@@ -2333,6 +2342,7 @@ func startlockedm(gp *g) {
 	_p_ := releasep()
 	mp.nextp.set(_p_)
 	notewakeup(&mp.park)
+	// dlog().s("startlockedm stopm").end()
 	stopm()
 }
 
@@ -2425,6 +2435,7 @@ top:
 	}
 
 	now, pollUntil, _ := checkTimers(_p_, 0)
+	// dlog().s("findrunnable ran checkTimers, pollUntil").i64(pollUntil - runtimeInitTime).end()
 
 	if fingwait && fingwake {
 		if gp := wakefing(); gp != nil {
@@ -2475,8 +2486,11 @@ top:
 	// If number of spinning M's >= number of busy P's, block.
 	// This is necessary to prevent excessive CPU consumption
 	// when GOMAXPROCS>>1 but the program parallelism is low.
-	if !_g_.m.spinning && 2*atomic.Load(&sched.nmspinning) >= procs-atomic.Load(&sched.npidle) {
-		goto stop
+	if !_g_.m.spinning {
+		if spinning, busy := atomic.Load(&sched.nmspinning), procs-atomic.Load(&sched.npidle); 2*spinning >= busy {
+			// dlog().s("findrunnable skipping work stealing").u32(spinning).u32(busy).end()
+			goto stop
+		}
 	}
 	if !_g_.m.spinning {
 		_g_.m.spinning = true
@@ -2484,10 +2498,12 @@ top:
 	}
 	const stealTries = 4
 	for i := 0; i < stealTries; i++ {
+		// dlog().s("findrunnable work stealing").i(i).end()
 		stealTimersOrRunNextG := i == stealTries-1
 
 		for enum := stealOrder.start(fastrand()); !enum.done(); enum.next() {
 			if sched.gcwaiting != 0 {
+				// dlog().s("findrunnable work stealing interupted by GC").end()
 				goto top
 			}
 			p2 := allp[enum.position()]
@@ -2524,6 +2540,7 @@ top:
 					// stolen G's. So check now if there
 					// is a local G to run.
 					if gp, inheritTime := runqget(_p_); gp != nil {
+						// dlog().s("findrunnable woke a G while stealing timers from P").u32(enum.position()).end()
 						return gp, inheritTime
 					}
 					ranTimer = true
@@ -2533,15 +2550,22 @@ top:
 			// Don't bother to attempt to steal if p2 is idle.
 			if !idlepMask.read(enum.position()) {
 				if gp := runqsteal(_p_, p2, stealTimersOrRunNextG); gp != nil {
+					// dlog().s("findrunnable stold work from P").u32(enum.position()).end()
 					return gp, false
 				}
 			}
 		}
+		// if stealTimersOrRunNextG {
+		// dlog().s("findrunnable workstealing checkTimers").s("pollUntil").i64(pollUntil - runtimeInitTime).end()
+		// }
 	}
 	if ranTimer {
 		// Running a timer may have made some goroutine ready.
+		// dlog().s("findrunnable stold timer from unknown P that woke a G").end()
 		goto top
 	}
+
+	// dlog().s("findrunnable could not steal work").end()
 
 stop:
 
@@ -2593,6 +2617,7 @@ stop:
 	lock(&sched.lock)
 	if sched.gcwaiting != 0 || _p_.runSafePointFn != 0 {
 		unlock(&sched.lock)
+		// dlog().s("findrunnable goto top (gcwaiting || runSafePoint) M").i64(_g_.m.id).end()
 		goto top
 	}
 	if sched.runqsize != 0 {
@@ -2603,6 +2628,7 @@ stop:
 	if releasep() != _p_ {
 		throw("findrunnable: wrong p")
 	}
+	// pid := _p_.id
 	pidleput(_p_)
 	unlock(&sched.lock)
 
@@ -2642,6 +2668,37 @@ stop:
 				goto top
 			}
 			break
+		}
+	}
+	// check for earlier timers created concurrently with stopping
+	// dlog().s("findrunnable last timer check start with now").i64(now - runtimeInitTime).s("pollUntil").i64(pollUntil - runtimeInitTime).s("oldP").i32(pid).s("M").i64(_g_.m.id).end()
+	for _, _p_ := range allpSnapshot {
+		if atomic.Load(&_p_.adjustTimers) > 0 {
+			if now == 0 {
+				now = nanotime()
+			}
+			pollUntil = now
+			// dlog().s("findrunnable last timer check for P").i32(_p_.id).s("found adjusted timer").s("oldP").i32(pid).s("M").i64(_g_.m.id).end()
+		} else {
+			w := int64(atomic.Load64(&_p_.timer0When))
+			if w != 0 {
+				if pollUntil == 0 || w < pollUntil {
+					pollUntil = w
+					// dlog().s("findrunnable last timer check for P").i32(_p_.id).s("found new timer").i64(w - runtimeInitTime).s("oldP").i32(pid).s("M").i64(_g_.m.id).end()
+				} else {
+					// dlog().s("findrunnable last timer check for P").i32(_p_.id).s("found timer").i64(w - runtimeInitTime).s("oldP").i32(pid).s("M").i64(_g_.m.id).end()
+				}
+			}
+		}
+	}
+	if pollUntil != 0 {
+		if now == 0 {
+			now = nanotime()
+		}
+		delta = pollUntil - now
+		// dlog().s("findrunnable last timer check updated delta").i64(delta).s("oldP").i32(pid).s("M").i64(_g_.m.id).end()
+		if delta < 0 {
+			delta = 0
 		}
 	}
 
@@ -2707,9 +2764,12 @@ stop:
 			// When using fake time, just poll.
 			delta = 0
 		}
+		// dlog().s("findrunnable block on netpoller oldP M").i32(pid).i64(_g_.m.id).i64(delta).i64(pollUntil - runtimeInitTime).s("was spinning").b(wasSpinning).end()
 		list := netpoll(delta) // block until new work is available
 		atomic.Store64(&sched.pollUntil, 0)
-		atomic.Store64(&sched.lastpoll, uint64(nanotime()))
+		now := nanotime()
+		atomic.Store64(&sched.lastpoll, uint64(now))
+		// dlog().s("findrunnable return from netpoller set lastpoll").i64(now - runtimeInitTime).s("late").i64(now - pollUntil).end()
 		if faketime != 0 && list.empty() {
 			// Using fake time and nothing is ready; stop M.
 			// When all M's stop, checkdead will call timejump.
@@ -2720,9 +2780,11 @@ stop:
 		_p_ = pidleget()
 		unlock(&sched.lock)
 		if _p_ == nil {
+			// dlog().s("findrunnable return from netpoller with no idle P's M").i64(_g_.m.id).i64(delta).end()
 			injectglist(&list)
 		} else {
 			acquirep(_p_)
+			// dlog().s("findrunnable return from netpoller M").i64(_g_.m.id).i64(delta).end()
 			if !list.empty() {
 				gp := list.pop()
 				injectglist(&list)
@@ -2741,10 +2803,13 @@ stop:
 	} else if pollUntil != 0 && netpollinited() {
 		pollerPollUntil := int64(atomic.Load64(&sched.pollUntil))
 		if pollerPollUntil == 0 || pollerPollUntil > pollUntil {
+			// dlog().s("findrunnable waking netpoller oldP M").i32(pid).i64(_g_.m.id).i64(pollUntil - runtimeInitTime).end()
 			netpollBreak()
 		}
 	}
+	// dlog().s("findrunnable stopm oldP M").i32(pid).i64(_g_.m.id).end()
 	stopm()
+	// dlog().s("findrunnable woke from stopm M").i64(_g_.m.id).end()
 	goto top
 }
 
@@ -2780,11 +2845,15 @@ func wakeNetPoller(when int64) {
 		// but should never miss a wakeup.
 		pollerPollUntil := int64(atomic.Load64(&sched.pollUntil))
 		if pollerPollUntil == 0 || pollerPollUntil > when {
+			// dlog().s("wakeNetPoller").i64(when - runtimeInitTime).i64(pollerPollUntil - runtimeInitTime).end()
 			netpollBreak()
+		} else {
+			// dlog().s("wakeNetPoller nothing to do").i64(when - runtimeInitTime).i64(pollerPollUntil - runtimeInitTime).end()
 		}
 	} else {
 		// There are no threads in the network poller, try to get
 		// one there so it can handle new timers.
+		// dlog().s("wakeNetPoller wakep for timer").i64(when - runtimeInitTime).end()
 		wakep()
 	}
 }
@@ -2802,6 +2871,7 @@ func resetspinning() {
 	// M wakeup policy is deliberately somewhat conservative, so check if we
 	// need to wakeup another P here. See "Worker thread parking/unparking"
 	// comment at the top of the file for details.
+	// dlog().s("resetspinning wakep").end()
 	wakep()
 }
 
@@ -2879,6 +2949,7 @@ func injectglist(glist *gList) {
 // Never returns.
 func schedule() {
 	_g_ := getg()
+	// dlog().s("schedule M").i64(_g_.m.id).end()
 
 	if _g_.m.locks != 0 {
 		throw("schedule: holding locks")
@@ -2886,6 +2957,7 @@ func schedule() {
 
 	if _g_.m.lockedg != 0 {
 		stoplockedm()
+		// dlog().s("schedule locked G").i64(_g_.m.lockedg.ptr().goid).end()
 		execute(_g_.m.lockedg.ptr(), false) // Never returns.
 	}
 
@@ -2915,6 +2987,7 @@ top:
 	}
 
 	checkTimers(pp, 0)
+	// dlog().s("schedule ran checkTimers").end()
 
 	var gp *g
 	var inheritTime bool
@@ -2981,15 +3054,18 @@ top:
 	// If about to schedule a not-normal goroutine (a GCworker or tracereader),
 	// wake a P if there is one.
 	if tryWakeP {
+		// dlog().s("schedule wakep (while running system goroutine)").end()
 		wakep()
 	}
 	if gp.lockedm != 0 {
 		// Hands off own p to the locked m,
 		// then blocks waiting for a new p.
+		// dlog().s("schedule handing off locked G").i64(gp.goid).end()
 		startlockedm(gp)
 		goto top
 	}
 
+	// dlog().s("schedule run G").i64(gp.goid).end()
 	execute(gp, inheritTime)
 }
 
@@ -3093,6 +3169,7 @@ func park_m(gp *g) {
 		_g_.m.waitunlockf = nil
 		_g_.m.waitlock = nil
 		if !ok {
+			// dlog().s("park_m unparking G").i64(gp.goid).end()
 			if trace.enabled {
 				traceGoUnpark(gp, 2)
 			}
@@ -3143,6 +3220,7 @@ func gopreempt_m(gp *g) {
 	if trace.enabled {
 		traceGoPreempt()
 	}
+	// dlog().s("gopreempt_m G M").i64(gp.goid).i64(gp.m.id).end()
 	goschedImpl(gp)
 }
 
@@ -3159,6 +3237,7 @@ func preemptPark(gp *g) {
 		throw("bad g status")
 	}
 	gp.waitreason = waitReasonPreempted
+	// dlog().s("preemptPark G").i64(gp.goid).s("gp.waitreason").end()
 	// Transition from _Grunning to _Gscan|_Gpreempted. We can't
 	// be in _Grunning when we dropg because then we'd be running
 	// without an M, but the moment we're in _Gpreempted,
@@ -3198,6 +3277,7 @@ func goexit1() {
 	if trace.enabled {
 		traceGoEnd()
 	}
+	// dlog().s("exit G").i64(getg().goid).end()
 	mcall(goexit0)
 }
 
@@ -3397,6 +3477,7 @@ func entersyscall() {
 func entersyscall_sysmon() {
 	lock(&sched.lock)
 	if atomic.Load(&sched.sysmonwait) != 0 {
+		// dlog().s("wake sysmon from entersyscall_sysmon").end()
 		atomic.Store(&sched.sysmonwait, 0)
 		notewakeup(&sched.sysmonnote)
 	}
@@ -3624,6 +3705,7 @@ func exitsyscallfast_pidle() bool {
 	lock(&sched.lock)
 	_p_ := pidleget()
 	if _p_ != nil && atomic.Load(&sched.sysmonwait) != 0 {
+		// dlog().s("wake sysmon from exitsyscallfast_pidle").end()
 		atomic.Store(&sched.sysmonwait, 0)
 		notewakeup(&sched.sysmonnote)
 	}
@@ -3652,17 +3734,20 @@ func exitsyscall0(gp *g) {
 	if _p_ == nil {
 		globrunqput(gp)
 	} else if atomic.Load(&sched.sysmonwait) != 0 {
+		// dlog().s("wake sysmon from exitsyscall0").end()
 		atomic.Store(&sched.sysmonwait, 0)
 		notewakeup(&sched.sysmonnote)
 	}
 	unlock(&sched.lock)
 	if _p_ != nil {
 		acquirep(_p_)
+		// dlog().s("exitsyscall0 run G").i64(gp.goid).end()
 		execute(gp, false) // Never returns.
 	}
 	if _g_.m.lockedg != 0 {
 		// Wait until another thread schedules gp and so m again.
 		stoplockedm()
+		// dlog().s("exitsyscall0 run locked G").i64(gp.goid).end()
 		execute(gp, false) // Never returns.
 	}
 	stopm()
@@ -3806,11 +3891,13 @@ func newproc(siz int32, fn *funcval) {
 	pc := getcallerpc()
 	systemstack(func() {
 		newg := newproc1(fn, argp, siz, gp, pc)
+		// dlog().s("go G").i64(newg.goid).end()
 
 		_p_ := getg().m.p.ptr()
 		runqput(_p_, newg, true)
 
 		if mainStarted {
+			// dlog().s("go wakep").end()
 			wakep()
 		}
 	})
@@ -4922,6 +5009,8 @@ var forcegcperiod int64 = 2 * 60 * 1e9
 //
 //go:nowritebarrierrec
 func sysmon() {
+	// traceProcStart()
+
 	lock(&sched.lock)
 	sched.nmsys++
 	checkdead()
@@ -4944,8 +5033,13 @@ func sysmon() {
 		if delay > 10*1000 { // up to 10ms
 			delay = 10 * 1000
 		}
+
+		// dlog().s("sysmon sleep").i(idle).u32(delay).end()
+		// traceProcStop(nil)
 		usleep(delay)
 		mDoFixup()
+		// traceProcStart()
+		// dlog().s("sysmon wake").end()
 
 		// sysmon should not enter deep sleep if schedtrace is enabled so that
 		// it can print that information at the right time.
@@ -4966,8 +5060,10 @@ func sysmon() {
 		if debug.schedtrace <= 0 && (sched.gcwaiting != 0 || atomic.Load(&sched.npidle) == uint32(gomaxprocs)) {
 			lock(&sched.lock)
 			if atomic.Load(&sched.gcwaiting) != 0 || atomic.Load(&sched.npidle) == uint32(gomaxprocs) {
+				// dlog().s("sysmon check").u32(atomic.Load(&sched.gcwaiting)).u32(atomic.Load(&sched.npidle)).end()
 				syscallWake := false
 				next, _ := timeSleepUntil()
+				// dlog().s("sysmon next timer").i64(next - runtimeInitTime).end()
 				if next > now {
 					atomic.Store(&sched.sysmonwait, 1)
 					unlock(&sched.lock)
@@ -4981,8 +5077,14 @@ func sysmon() {
 					if shouldRelax {
 						osRelax(true)
 					}
+
+					// dlog().s("sysmon note sleep").i64(sleep).end()
+					// traceProcStop(nil)
 					syscallWake = notetsleep(&sched.sysmonnote, sleep)
 					mDoFixup()
+					// traceProcStart()
+					// dlog().s("sysmon note wake").end()
+
 					if shouldRelax {
 						osRelax(false)
 					}
@@ -5183,6 +5285,7 @@ func preemptone(_p_ *p) bool {
 	// Request an async preemption of this P.
 	if preemptMSupported && debug.asyncpreemptoff == 0 {
 		_p_.preempt = true
+		// dlog().s("signaling preemption for G").i64(gp.goid).s("on P").i32(_p_.id).s("on M").i64(mp.id).end()
 		preemptM(mp)
 	}
 
