@@ -2217,6 +2217,7 @@ func startm(_p_ *p, spinning bool) {
 	// The caller incremented nmspinning, so set m.spinning in the new M.
 	mp.spinning = spinning
 	mp.nextp.set(_p_)
+	dlog().s("startm claim P").i32(_p_.id).s("for M").i64(mp.id).end()
 	notewakeup(&mp.park)
 }
 
@@ -2670,9 +2671,15 @@ stop:
 			break
 		}
 	}
-	// check for earlier timers created concurrently with stopping
+
+	// Similar to above, check for timer creation or expiry concurrently with
+	// transitioning from spinning to non-spinning. Note that we cannot use
+	// checkTimers here because it calls adjusttimers which may need to allocate
+	// memory, and that isn't allowed when we don't have an active P.
 	dlog().s("findrunnable last timer check start with now").i64(now - runtimeInitTime).s("pollUntil").i64(pollUntil - runtimeInitTime).s("oldP").i32(pid).s("M").i64(_g_.m.id).end()
 	for _, _p_ := range allpSnapshot {
+		// This is similar to nobarrierWakeTime, but minimizes calls to
+		// nanotime.
 		if atomic.Load(&_p_.adjustTimers) > 0 {
 			if now == 0 {
 				now = nanotime()
@@ -2697,35 +2704,6 @@ stop:
 		}
 		delta = pollUntil - now
 		dlog().s("findrunnable last timer check updated delta").i64(delta).s("oldP").i32(pid).s("M").i64(_g_.m.id).end()
-		if delta < 0 {
-			delta = 0
-		}
-	}
-
-	// Similar to above, check for timer creation or expiry concurrently with
-	// transitioning from spinning to non-spinning. Note that we cannot use
-	// checkTimers here because it calls adjusttimers which may need to allocate
-	// memory, and that isn't allowed when we don't have an active P.
-	for _, _p_ := range allpSnapshot {
-		// This is similar to nobarrierWakeTime, but minimizes calls to
-		// nanotime.
-		if atomic.Load(&_p_.adjustTimers) > 0 {
-			if now == 0 {
-				now = nanotime()
-			}
-			pollUntil = now
-		} else {
-			w := int64(atomic.Load64(&_p_.timer0When))
-			if w != 0 && (pollUntil == 0 || w < pollUntil) {
-				pollUntil = w
-			}
-		}
-	}
-	if pollUntil != 0 {
-		if now == 0 {
-			now = nanotime()
-		}
-		delta = pollUntil - now
 		if delta < 0 {
 			delta = 0
 		}
@@ -2764,7 +2742,7 @@ stop:
 			// When using fake time, just poll.
 			delta = 0
 		}
-		dlog().s("findrunnable block on netpoller oldP M").i32(pid).i64(_g_.m.id).i64(delta).i64(pollUntil - runtimeInitTime).s("was spinning").b(wasSpinning).end()
+		dlog().s("findrunnable block on netpoller oldP").i32(pid).s("M").i64(_g_.m.id).i64(delta).i64(pollUntil - runtimeInitTime).s("was spinning").b(wasSpinning).end()
 		list := netpoll(delta) // block until new work is available
 		atomic.Store64(&sched.pollUntil, 0)
 		now := nanotime()
@@ -5169,6 +5147,8 @@ type sysmontick struct {
 const forcePreemptNS = 10 * 1000 * 1000 // 10ms
 
 func retake(now int64) uint32 {
+	dlog().s("retake now").i64(now - runtimeInitTime).end()
+
 	n := 0
 	// Prevent allp slice changes. This lock will be completely
 	// uncontended unless we're already stopping the world.
