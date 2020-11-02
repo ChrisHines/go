@@ -2507,6 +2507,7 @@ func startm(_p_ *p, spinning bool) {
 	// The caller incremented nmspinning, so set m.spinning in the new M.
 	nmp.spinning = spinning
 	nmp.nextp.set(_p_)
+	dlog().s("startm claim P").i32(_p_.id).s("for M").i64(mp.id).end()
 	notewakeup(&nmp.park)
 	// Ownership transfer of _p_ committed by wakeup. Preemption is now
 	// safe.
@@ -2779,7 +2780,7 @@ top:
 	// This is necessary to prevent excessive CPU consumption when
 	// GOMAXPROCS>>1 but the program parallelism is low.
 	procs := uint32(gomaxprocs)
-	if _g_.m.spinning || 2*atomic.Load(&sched.nmspinning) < procs-atomic.Load(&sched.npidle) {
+	if spinning, busy := atomic.Load(&sched.nmspinning), procs-atomic.Load(&sched.npidle); _g_.m.spinning || 2*spinning < busy {
 		if !_g_.m.spinning {
 			_g_.m.spinning = true
 			atomic.Xadd(&sched.nmspinning, 1)
@@ -2932,7 +2933,7 @@ top:
 		// Note that we cannot use checkTimers here because it calls
 		// adjusttimers which may need to allocate memory, and that isn't
 		// allowed when we don't have an active P.
-		pollUntil = checkTimersNoP(allpSnapshot, timerpMaskSnapshot, pollUntil)
+		pollUntil = checkTimersNoP(pid, allpSnapshot, timerpMaskSnapshot, pollUntil)
 	}
 
 	// Poll network until next timer.
@@ -2974,11 +2975,11 @@ top:
 		_p_ = pidleget()
 		unlock(&sched.lock)
 		if _p_ == nil {
-			dlog().s("findrunnable return from netpoller with no idle P's M").i64(_g_.m.id).i64(delta).end()
+			dlog().s("findrunnable return from netpoller with no idle P's M").i64(_g_.m.id).i64(delay).end()
 			injectglist(&list)
 		} else {
 			acquirep(_p_)
-			dlog().s("findrunnable return from netpoller M").i64(_g_.m.id).i64(delta).end()
+			dlog().s("findrunnable return from netpoller M").i64(_g_.m.id).i64(delay).end()
 			if !list.empty() {
 				gp := list.pop()
 				injectglist(&list)
@@ -3136,16 +3137,17 @@ func checkRunqsNoP(allpSnapshot []*p, idlepMaskSnapshot pMask) *p {
 // Check all Ps for a timer expiring sooner than pollUntil.
 //
 // Returns updated pollUntil value.
-func checkTimersNoP(allpSnapshot []*p, timerpMaskSnapshot pMask, pollUntil int64) int64 {
+func checkTimersNoP(pid int32, allpSnapshot []*p, timerpMaskSnapshot pMask, pollUntil int64) int64 {
 	for id, p2 := range allpSnapshot {
 		if timerpMaskSnapshot.read(uint32(id)) {
 			w := nobarrierWakeTime(p2)
 			if w != 0 {
+				_g_ := getg()
 				if pollUntil == 0 || w < pollUntil {
 					pollUntil = w
-					dlog().s("findrunnable last timer check for P").i32(_p_.id).s("found new timer").i64(w - runtimeInitTime).s("oldP").i32(pid).s("M").i64(_g_.m.id).end()
+					dlog().s("findrunnable last timer check for P").i32(p2.id).s("found new timer").i64(w - runtimeInitTime).s("oldP").i32(pid).s("M").i64(_g_.m.id).end()
 				} else {
-					dlog().s("findrunnable last timer check for P").i32(_p_.id).s("found timer").i64(w - runtimeInitTime).s("oldP").i32(pid).s("M").i64(_g_.m.id).end()
+					dlog().s("findrunnable last timer check for P").i32(p2.id).s("found timer").i64(w - runtimeInitTime).s("oldP").i32(pid).s("M").i64(_g_.m.id).end()
 				}
 			}
 		}
@@ -5542,6 +5544,8 @@ type sysmontick struct {
 const forcePreemptNS = 10 * 1000 * 1000 // 10ms
 
 func retake(now int64) uint32 {
+	dlog().s("retake now").i64(now - runtimeInitTime).end()
+
 	n := 0
 	// Prevent allp slice changes. This lock will be completely
 	// uncontended unless we're already stopping the world.
