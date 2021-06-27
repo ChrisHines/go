@@ -424,6 +424,7 @@ const osRelaxMinNS = 60 * 1e6
 // need to consume extra power to drive the high-res timer.
 func osRelax(relax bool) uint32 {
 	if haveHighResTimer {
+		dlog().s("osRelax haveHighResTimer").b(haveHighResTimer).end()
 		// If the high resolution timer is available, the runtime uses the timer
 		// to sleep for short durations. This means there's no need to adjust
 		// the global clock frequency.
@@ -431,8 +432,10 @@ func osRelax(relax bool) uint32 {
 	}
 
 	if relax {
+		dlog().s("osRelax(true)").end()
 		return uint32(stdcall1(_timeEndPeriod, 1))
 	} else {
+		dlog().s("osRelax(false)").end()
 		return uint32(stdcall1(_timeBeginPeriod, 1))
 	}
 }
